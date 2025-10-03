@@ -5,7 +5,7 @@ echo "╔═══════════════════════�
 echo "║                                                        ║"
 echo "║   🎙️  WHISPER TRANSCRIPTION ULTRA - SETUP            ║"
 echo "║                                                        ║"
-echo "║   Setup automatico in 5 minuti                        ║"
+echo "║   Setup automatico con GPU in 5-10 minuti            ║"
 echo "║                                                        ║"
 echo "╚════════════════════════════════════════════════════════╝"
 echo ""
@@ -19,7 +19,7 @@ NC='\033[0m'
 
 # Step counter
 STEP=1
-TOTAL_STEPS=8
+TOTAL_STEPS=9
 
 step() {
     echo ""
@@ -39,9 +39,9 @@ echo -e "${GREEN}✅ macOS rilevato${NC}"
 
 ARCH=$(uname -m)
 if [[ "$ARCH" == "arm64" ]]; then
-    echo -e "${GREEN}✅ Apple Silicon ($ARCH) - Perfetto per GPU!${NC}"
+    echo -e "${GREEN}✅ Apple Silicon ($ARCH) - GPU disponibile!${NC}"
 else
-    echo -e "${YELLOW}⚠️  Chip Intel - GPU non disponibile ma funzionerà${NC}"
+    echo -e "${YELLOW}⚠️  Chip Intel - Solo CPU disponibile${NC}"
 fi
 
 # Verifica/installa Homebrew
@@ -78,6 +78,12 @@ echo -e "${GREEN}✅ Ambiente virtuale attivo${NC}"
 step "Installazione dipendenze Python"
 pip install --upgrade pip --quiet
 pip install -r requirements.txt --quiet
+
+# Installa anche ane_transformers per CoreML (opzionale ma utile)
+if [[ "$ARCH" == "arm64" ]]; then
+    pip install ane_transformers --quiet 2>/dev/null
+fi
+
 echo -e "${GREEN}✅ Dipendenze installate${NC}"
 
 # Setup whisper.cpp
@@ -91,13 +97,13 @@ cd whisper.cpp
 echo "🧹 Pulizia build precedenti..."
 make clean > /dev/null 2>&1
 
-echo "🔨 Compilazione con GPU (2-4 minuti)..."
+echo "🔨 Compilazione con supporto GPU (2-4 minuti)..."
 if [[ "$ARCH" == "arm64" ]]; then
     WHISPER_COREML=1 make > /dev/null 2>&1
     if [ $? -eq 0 ]; then
-        echo -e "${GREEN}✅ Compilato con accelerazione GPU!${NC}"
+        echo -e "${GREEN}✅ Compilato con supporto CoreML GPU!${NC}"
     else
-        echo -e "${YELLOW}⚠️  GPU fallita, compilo versione CPU...${NC}"
+        echo -e "${YELLOW}⚠️  Compilazione GPU fallita, uso CPU...${NC}"
         make > /dev/null 2>&1
     fi
 else
@@ -106,6 +112,66 @@ else
 fi
 
 cd ..
+
+# Download e conversione modello per GPU
+step "Setup modello AI con accelerazione GPU"
+
+MODEL_DIR="whisper.cpp/models"
+MODEL_FILE="$MODEL_DIR/ggml-base.bin"
+COREML_MODEL="$MODEL_DIR/ggml-base-encoder.mlmodelc"
+
+mkdir -p "$MODEL_DIR"
+
+# Scarica modello base se manca
+if [ ! -f "$MODEL_FILE" ]; then
+    echo "📥 Scaricamento modello base (142MB)..."
+    curl -L --progress-bar \
+        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin" \
+        -o "$MODEL_FILE"
+    
+    if [ -f "$MODEL_FILE" ]; then
+        echo -e "${GREEN}✅ Modello base scaricato${NC}"
+    else
+        echo -e "${RED}❌ Download fallito${NC}"
+        exit 1
+    fi
+else
+    echo -e "${GREEN}✅ Modello base già presente${NC}"
+fi
+
+# Converti per CoreML (GPU) solo su Apple Silicon
+if [[ "$ARCH" == "arm64" ]] && [ ! -d "$COREML_MODEL" ]; then
+    echo ""
+    echo "🔥 Conversione modello per GPU (1-3 minuti)..."
+    echo "   Questo abilita accelerazione 10-15x più veloce!"
+    echo ""
+    
+    cd whisper.cpp/models
+    
+    # Scarica script conversione se manca
+    if [ ! -f "generate-coreml-model.sh" ]; then
+        curl -s -o generate-coreml-model.sh \
+            "https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/generate-coreml-model.sh"
+        chmod +x generate-coreml-model.sh
+    fi
+    
+    # Converti modello (mostra output per feedback)
+    ./generate-coreml-model.sh base
+    
+    cd ../..
+    
+    if [ -d "$COREML_MODEL" ]; then
+        echo ""
+        echo -e "${GREEN}🎉 GPU ATTIVA! Modello CoreML creato con successo!${NC}"
+        echo "   Aspettati velocità 10-15x superiori!"
+    else
+        echo -e "${YELLOW}⚠️  Conversione fallita, userà CPU (comunque funziona)${NC}"
+    fi
+elif [[ "$ARCH" == "arm64" ]] && [ -d "$COREML_MODEL" ]; then
+    echo -e "${GREEN}✅ GPU già attiva (modello CoreML presente)${NC}"
+else
+    echo -e "${YELLOW}ℹ️  Chip Intel - GPU CoreML non disponibile, userà CPU${NC}"
+fi
 
 # Crea cartelle
 step "Creazione directory"
@@ -141,13 +207,21 @@ echo "║          🎉 SETUP COMPLETATO CON SUCCESSO! 🎉         ║"
 echo "║                                                        ║"
 echo "╚════════════════════════════════════════════════════════╝"
 echo ""
-echo -e "${GREEN}✅ Tutto pronto!${NC}"
+echo -e "${GREEN}✅ Installazione completata!${NC}"
 echo ""
-echo "📋 COSA È STATO CONFIGURATO:"
-echo "   • Homebrew e FFmpeg"
-echo "   • Python e dipendenze"
-echo "   • Whisper.cpp con GPU (se disponibile)"
-echo "   • Directory e configurazioni"
+echo "📋 CONFIGURAZIONE:"
+echo "   • Homebrew e FFmpeg installati"
+echo "   • Python e dipendenze pronte"
+echo "   • Whisper.cpp compilato"
+echo "   • Modello AI base scaricato"
+
+if [[ "$ARCH" == "arm64" ]] && [ -d "$COREML_MODEL" ]; then
+    echo -e "   • ${GREEN}🔥 GPU ATTIVA (CoreML)${NC}"
+    echo "   • Velocità: 10-15x più veloce!"
+else
+    echo "   • CPU only (comunque veloce)"
+fi
+
 echo ""
 echo "🚀 PER AVVIARE L'APP:"
 echo ""

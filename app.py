@@ -7,6 +7,7 @@ import shutil
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing
+import platform
 
 st.set_page_config(page_title="Trascrizione Whisper Ultra", layout="wide")
 
@@ -38,7 +39,6 @@ def check_and_install_whisper_cpp():
             return False
     
     st.info("Compilazione whisper.cpp con CoreML (3-5 minuti)...")
-    # Compila con CoreML per Apple Silicon
     result = subprocess.run(
         ["make", "WHISPER_COREML=1"], 
         cwd=whisper_dir, 
@@ -95,6 +95,64 @@ def download_model_if_missing(model="tiny"):
         st.error(f"Errore download: {e}")
         return False
 
+def check_coreml_available(model="base"):
+    """Verifica se il modello CoreML per GPU è disponibile"""
+    model_dir = "whisper.cpp/models"
+    coreml_path = f"{model_dir}/ggml-{model}-encoder.mlmodelc"
+    return os.path.exists(coreml_path)
+
+def convert_model_to_coreml(model="base"):
+    """Converte il modello per uso GPU CoreML"""
+    model_dir = "whisper.cpp/models"
+    model_path = f"{model_dir}/ggml-{model}.bin"
+    
+    if not os.path.exists(model_path):
+        st.error(f"Modello {model} non trovato. Scaricalo prima.")
+        return False
+    
+    st.info(f"🔥 Conversione modello {model} per GPU (1-2 minuti)...")
+    progress_placeholder = st.empty()
+    
+    original_dir = os.getcwd()
+    
+    try:
+        os.chdir(model_dir)
+        
+        # Scarica script se manca
+        script_path = "generate-coreml-model.sh"
+        if not os.path.exists(script_path):
+            progress_placeholder.text("Download script conversione...")
+            subprocess.run([
+                "curl", "-s", "-o", script_path,
+                "https://raw.githubusercontent.com/ggerganov/whisper.cpp/master/models/generate-coreml-model.sh"
+            ])
+            os.chmod(script_path, 0o755)
+        
+        # Esegui conversione
+        progress_placeholder.text(f"Conversione in corso... (può richiedere 1-2 minuti)")
+        result = subprocess.run(
+            [f"./{script_path}", model],
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+        
+        os.chdir(original_dir)
+        progress_placeholder.empty()
+        
+        if check_coreml_available(model):
+            st.success(f"✅ GPU attivata per modello {model}! Velocità 10-15x")
+            return True
+        else:
+            st.warning("⚠️ Conversione fallita, userà CPU")
+            return False
+            
+    except Exception as e:
+        os.chdir(original_dir)
+        progress_placeholder.empty()
+        st.error(f"Errore conversione: {e}")
+        return False
+
 # Setup iniziale
 if not check_and_install_whisper_cpp():
     st.error("Impossibile installare whisper.cpp. Verifica i prerequisiti.")
@@ -106,15 +164,38 @@ if not os.path.exists("whisper.cpp/models/ggml-base.bin"):
 
 st.title("🚀 Trascrizione Ultra-Veloce (GPU + Parallel)")
 
-# Badge informativo
-col_info1, col_info2, col_info3 = st.columns(3)
+# Badge informativo con verifica GPU
+col_info1, col_info2, col_info3, col_info4 = st.columns(4)
 with col_info1:
-    st.metric("🔥 Accelerazione", "CoreML GPU")
+    gpu_available = check_coreml_available("base")
+    gpu_status = "🔥 Attiva" if gpu_available else "⚠️ CPU only"
+    st.metric("GPU CoreML", gpu_status)
+    
 with col_info2:
     st.metric("⚡ Processing", "Parallelo")
+    
 with col_info3:
     cpu_count = multiprocessing.cpu_count()
     st.metric("🖥️ CPU Cores", f"{cpu_count}")
+    
+with col_info4:
+    chip = platform.processor()
+    if "arm" in chip.lower():
+        st.metric("💻 Chip", "Apple Silicon")
+    else:
+        st.metric("💻 Chip", "Intel")
+
+# Avviso GPU
+if not gpu_available and "arm" in platform.processor().lower():
+    with st.expander("⚡ Attiva GPU per 10-15x velocità", expanded=False):
+        st.warning("**GPU non attiva!** Puoi attivarla per velocità 10-15x superiori.")
+        st.write("**Opzioni:**")
+        st.write("1. Esegui `./setup.sh` dal terminale (consigliato)")
+        st.write("2. Oppure clicca qui sotto:")
+        
+        if st.button("🔥 Attiva GPU CoreML per modello base"):
+            convert_model_to_coreml("base")
+            st.rerun()
 
 operation = st.selectbox("Scegli un'operazione:", ["Trascrivi Audio", "Scarica Video"])
 
@@ -174,6 +255,17 @@ if operation == "Trascrivi Audio":
             "small": "🔬 Massima qualità (466MB) - 98% precisione"
         }
         st.caption(model_info[model_name])
+        
+        # Verifica GPU per modello selezionato
+        if check_coreml_available(model_name):
+            st.success(f"✅ GPU attiva per {model_name}")
+        else:
+            st.warning(f"⚠️ GPU non attiva (userà CPU)")
+            if st.button(f"🔥 Attiva GPU per {model_name}", key=f"convert_{model_name}"):
+                if not os.path.exists(f"whisper.cpp/models/ggml-{model_name}.bin"):
+                    download_model_if_missing(model_name)
+                convert_model_to_coreml(model_name)
+                st.rerun()
     
     with col2:
         language = st.selectbox("Lingua:", ["auto", "it", "en"])
@@ -187,7 +279,6 @@ if operation == "Trascrivi Audio":
         )
         st.caption(f"Audio diviso in segmenti da {chunk_duration}min")
     
-    # Parallelizzazione
     max_workers = st.slider(
         "🔀 Worker paralleli:",
         min_value=1,
@@ -275,7 +366,6 @@ def split_audio_chunks(audio_path, chunk_duration_minutes=30):
             chunk_path, '-y'
         ]
         
-        # FIX: rimosso capture_output
         result = subprocess.run(
             command, 
             stdout=subprocess.DEVNULL,
@@ -298,13 +388,12 @@ def convert_audio(video_path, output_path="audio.wav"):
     
     command = [
         'ffmpeg', '-i', video_path,
-        '-ar', '16000',  # 16kHz
-        '-ac', '1',      # Mono
+        '-ar', '16000',
+        '-ac', '1',
         '-c:a', 'pcm_s16le',
         output_path, '-y'
     ]
     
-    # FIX: usa stdout e stderr invece di capture_output
     result = subprocess.run(
         command, 
         stdout=subprocess.DEVNULL,
@@ -321,14 +410,13 @@ def transcribe_chunk(args):
     
     model_path = f"whisper.cpp/models/ggml-{model}.bin"
     
-    # Comando ottimizzato con CoreML
     command = [
         './whisper.cpp/build/bin/whisper-cli',
         '-m', model_path,
         '-f', chunk_path,
         '--output-txt',
         '--language', language,
-        '-t', '2',  # 2 thread per chunk (per non sovraccaricare)
+        '-t', '2',
         '-p', '1'
     ]
     
@@ -337,7 +425,7 @@ def transcribe_chunk(args):
             command, 
             capture_output=True, 
             text=True,
-            timeout=600  # Timeout 10 min per chunk
+            timeout=600
         )
         
         transcript_file = f"{chunk_path}.txt"
@@ -346,7 +434,6 @@ def transcribe_chunk(args):
             with open(transcript_file, "r") as f:
                 text = f.read()
             
-            # Pulizia immediata
             try:
                 os.remove(transcript_file)
             except:
@@ -365,27 +452,23 @@ def transcribe_parallel(chunks, language, model, max_workers=4):
     """Trascrizione parallela con progress bar"""
     
     if len(chunks) == 1:
-        # Audio breve, trascrivi direttamente
         st.info("🎙️ Trascrizione in corso...")
         result = transcribe_chunk((chunks[0], language, model, 0, 1))
         return result[1] if result[2] else None
     
     st.info(f"🚀 Trascrizione parallela con {max_workers} worker...")
     
-    # Prepara argomenti per ogni chunk
     chunk_args = [
         (chunk, language, model, i, len(chunks)) 
         for i, chunk in enumerate(chunks)
     ]
     
-    # Progress tracking
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     results = {}
     completed = 0
     
-    # Esegui in parallelo
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(transcribe_chunk, arg): arg for arg in chunk_args}
         
@@ -404,7 +487,6 @@ def transcribe_parallel(chunks, language, model, max_workers=4):
     progress_bar.empty()
     status_text.empty()
     
-    # Riordina e concatena risultati
     sorted_results = [results[i] for i in sorted(results.keys())]
     full_text = "\n\n".join(sorted_results)
     
@@ -433,7 +515,6 @@ if st.button("▶️ AVVIA TRASCRIZIONE ULTRA-VELOCE", type="primary", use_conta
             download_video(video_url, save_path)
     
     elif operation == "Trascrivi Audio":
-        # Ottieni file video
         if source_type == "YouTube (URL)" and video_url:
             os.makedirs("temp", exist_ok=True)
             video_path = download_video(video_url, "temp")
@@ -450,35 +531,28 @@ if st.button("▶️ AVVIA TRASCRIZIONE ULTRA-VELOCE", type="primary", use_conta
             video_path = local_path
         
         if video_path and os.path.exists(video_path):
-            # Estrai audio
             audio_path = convert_audio(video_path)
             
             if audio_path:
-                # Mostra info durata
                 duration = get_audio_duration(audio_path)
                 if duration > 0:
                     st.info(f"⏱️ Durata audio: {duration/60:.1f} minuti")
                 
-                # Dividi in chunk
                 chunks = split_audio_chunks(audio_path, chunk_duration)
                 
-                # Trascrizione parallela
                 text = transcribe_parallel(chunks, language, model_name, max_workers)
                 
-                # Pulizia chunk
                 cleanup_chunks()
                 
                 if text:
                     elapsed = time.time() - start_time
                     
-                    # Calcola velocità
                     if duration > 0:
                         speed_factor = duration / elapsed
                         st.success(f"🎉 COMPLETATO in {elapsed/60:.1f} minuti (velocità: {speed_factor:.1f}x)")
                     else:
                         st.success(f"🎉 COMPLETATO in {elapsed/60:.1f} minuti")
                     
-                    # Salva trascrizione
                     os.makedirs("trascrizioni", exist_ok=True)
                     timestamp = time.strftime("%Y%m%d_%H%M%S")
                     final_path = f"trascrizioni/{video_name}_{timestamp}.txt"
@@ -486,10 +560,8 @@ if st.button("▶️ AVVIA TRASCRIZIONE ULTRA-VELOCE", type="primary", use_conta
                     with open(final_path, "w") as f:
                         f.write(text)
                     
-                    # Mostra risultati
                     st.subheader("📝 Trascrizione")
                     
-                    # Statistiche
                     word_count = len(text.split())
                     char_count = len(text)
                     
@@ -514,7 +586,6 @@ if st.button("▶️ AVVIA TRASCRIZIONE ULTRA-VELOCE", type="primary", use_conta
                 else:
                     st.error("❌ Errore durante la trascrizione")
                 
-                # Pulizia file temporanei
                 if os.path.exists(video_path) and "temp" in video_path:
                     try:
                         os.remove(video_path)
@@ -530,6 +601,5 @@ if st.button("▶️ AVVIA TRASCRIZIONE ULTRA-VELOCE", type="primary", use_conta
         else:
             st.error("❌ Nessun file valido trovato")
 
-# Footer informativo
 st.markdown("---")
 st.caption("🚀 Powered by Whisper.cpp + CoreML + Parallel Processing | Ottimizzato per Apple Silicon")
